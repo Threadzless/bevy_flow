@@ -1,6 +1,6 @@
-use std::{ops::{Deref, DerefMut}, any::type_name};
+use std::{any::type_name, fmt::Debug, ops::{Deref, DerefMut}};
 
-use bevy::{asset::{AssetPath, LoadedFolder}, ecs::event::EventId, prelude::*, tasks::block_on};
+use bevy::{asset::{AssetPath, LoadedFolder}, ecs::{event::EventId, system::{SystemParam, SystemParamItem, SystemState}}, prelude::*, tasks::block_on};
 use async_channel::{Receiver, Sender};
 
 use crate::runner::{LTMsg, LTResult};
@@ -75,7 +75,7 @@ impl FlowContext {
     /// 
     /// Panics if the controling [`FlowTaskRunner`](super::runner::FlowTaskRunner) 
     /// is dropped. This shouldn't happen
-    pub fn with_world<Ret>(&mut self, call: impl Fn(&mut World) -> Ret) -> Ret {
+    pub fn with_world<Ret>(&self, call: impl FnOnce(&mut World) -> Ret) -> Ret {
         block_on(async {
             let world_ptr = self.request_world().await;
             let world = unsafe { &mut *world_ptr };
@@ -85,6 +85,49 @@ impl FlowContext {
             ret
         })
     }
+
+    /// Get a single Resource for a moment
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the Resource doesn't exist
+    pub fn with_resource<Res, Ret>(&self, call: impl FnOnce(&mut Res) -> Ret) -> Ret 
+    where Res: Resource
+    {
+        self.with_world(|world| {
+            let mut res = world.get_resource_mut::<Res>().unwrap();
+            call(&mut res)
+        })
+    }
+
+    /// Get access to multiple resources and/or queries
+    pub fn with<Param, Ret>(&self, call: impl FnOnce(SystemParamItem<Param>) -> Ret) -> Ret 
+    where
+        Param: SystemParam + 'static,
+    {
+        self.with_world(|world| {
+            let mut state = SystemState::<Param>::new(world);
+            let param = state.get_mut(world);
+            call(param)
+        })        
+    }
+
+    /// Gets a copy of a Resource
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the Resource doesn't exist
+    pub fn copy_res<R>(&self) -> R
+    where
+        R: Resource + Clone 
+    {
+        self.with_world(|world| {
+            world.get_resource::<R>().unwrap().clone()
+        })
+    }
+
+    // pub fn with_system<Sys>
+    // TODO: system params
 
     /// Directly access the [`AssetServer`]. Using this doesn't effect the main apps 
     /// scheduling, and works as normal
@@ -154,16 +197,18 @@ impl FlowContext {
     /// Loads a folder, like [`AssetServer::load_folder`], then waits until the 
     /// every file in that folder is loaded, then returns a list of all
     /// the assets loaded loaded
+    /// 
+    /// **NOTE:** Be sure to use `await` on this function or it will be skipped
     #[allow(clippy::missing_panics_doc)] // shouldn't be able to panic
-    pub async fn await_folder<'a>(
-        &'a self, 
-        path: impl Into<AssetPath<'a>>
+    pub async fn await_folder(
+        &self, 
+        path: impl Into<AssetPath<'_>>
     ) -> (Handle<LoadedFolder>, LoadedFolder) 
     {
         let folder_handle = self.assets.load_folder(path);
         let folder_id = Into::<AssetId<LoadedFolder>>::into(folder_handle.clone());
         
-        self.await_event::<AssetEvent<LoadedFolder>, _>(|evt| {
+        let _ = self.await_event::<AssetEvent<LoadedFolder>>(|evt| {
             match evt {
                 AssetEvent::LoadedWithDependencies { id } => &folder_id == id,
                 _ => false
@@ -182,46 +227,86 @@ impl FlowContext {
 
     /// Wait until an event which satisfies `filter` occures before continuing
     /// 
+    /// **NOTE:** Be sure to use `await` on this function or it will be skipped
+    ///
     /// # Panics
     /// 
     /// Panics if the the event hasn't been insterted into the bevy App.
     /// 
     /// See [`App::add_event`]
-    pub async fn await_event<E, F>(&self, filter: F) -> E
+    #[must_use]
+    pub async fn await_event<E>(&self, filter: impl Fn(&E) -> bool) 
+    where
+        E: Event + Debug,
+    {
+        loop {
+            let world = self.borrow().await;
+            let Some(events) = world.get_resource::<Events<E>>() else {
+                panic!("Resource {} is not present", type_name::<Events<E>>())
+            };
+            let mut reader = events.get_reader();
+
+            for evt in reader.read(events) {
+                if filter(evt) { return }
+            }
+        }
+    }
+    
+    /// Wait until an event which satisfies `filter` occures before returning it.
+    /// This requires the event to implement [`Clone`]
+    /// 
+    /// **NOTE:** Be sure to use `await` on this function or it will be skipped
+    ///
+    /// # Panics
+    /// 
+    /// Panics if the the event hasn't been insterted into the bevy App.
+    /// 
+    /// See [`App::add_event`]
+    #[must_use]
+    pub async fn await_event_return<E, F>(&self, filter: F) -> E
     where
         E: Event + Clone,
         F: Fn(&E) -> bool,
     {
-        self.await_cond(|world| {
-            let Some(events) = world.get_resource::<Events<E>>() else {
-                panic!("Resource {} is not present", type_name::<Events<E>>())
-            };
+        loop {
+            let world = self.borrow().await;
+            let events = world.get_resource::<Events<E>>().unwrap();
             for evt in events.get_reader().read(events) {
-                if filter(evt) { return Some(evt.clone()) }
+                if filter(evt) { return evt.clone() }
             }
-            None
-        }).await
+        }
     }
 
     /// Delay this flow until a given state is reached.
     /// 
+    /// **NOTE:** Be sure to use `await` on this function or it will be skipped
+    ///
     /// # Panics
     /// 
     /// Panics if the the State hasn't been insterted into the bevy App.
     /// 
     /// See [`App::init_state`] or [`App::insert_state`]
+    #[must_use]
     pub async fn await_state<S: States>(&self, matches: S) {
-        self.await_cond(|world| {
+        loop {
+            let world = self.borrow().await;
             let state = world.get_resource::<State<S>>().unwrap();
-            if state.get() == &matches { Some(()) } else { None }
-        }).await
+            if state.get() == &matches {
+                return
+            }
+        }
     }
 
     /// Wait until a certain condition is met before continuing
+    /// 
+    /// **NOTE:** Be sure to use `await` on this function or it will be skipped
+    #[must_use]
     pub async fn await_cond<R>(&self, cond: impl Fn(&WorldRef) -> Option<R>) -> R {
         loop {
             let world = self.borrow().await;
-            if let Some(ret) = cond(&world) { return ret }
+            if let Some(ret) = cond(&world) {
+                return ret
+            }
         }
     }
 }
@@ -261,47 +346,47 @@ impl<'a> DerefMut for WorldRef<'a> {
 }
 
 impl<'a> WorldRef<'a> {
-    /// Schedules changing a [`State`] resource at the end of the next update cycle.
-    /// 
-    /// This is equivalent to calling [`NextState::set`] in a normal system
-    /// 
-    /// # Panics
-    /// 
-    /// Panics if the the State hasn't been insterted into the bevy App.
-    /// 
-    /// See [`App::init_state`] or [`App::insert_state`]
-    pub fn set_state<S: States>(&mut self, new: S) {
-        println!("Setting State {new:?}");
-        let mut next = self.world.get_resource_mut::<NextState<S>>().unwrap();
-        next.set(new);
-    }
+    // /// Schedules changing a [`State`] resource at the end of the next update cycle.
+    // /// 
+    // /// This is equivalent to calling [`NextState::set`] in a normal system
+    // /// 
+    // /// # Panics
+    // /// 
+    // /// Panics if the the State hasn't been insterted into the bevy App.
+    // /// 
+    // /// See [`App::init_state`] or [`App::insert_state`]
+    // pub fn set_state<S: States>(&mut self, new: S) {
+    //     println!("Setting State {new:?}");
+    //     let mut next = self.world.get_resource_mut::<NextState<S>>().unwrap();
+    //     next.set(new);
+    // }
 
-    /// Sends an [`Event`] to the game, that will be recieved on the next update cycle.
-    /// 
-    /// This is the same as calling [`EventWriter::send`] in a normal system
-    /// 
-    /// # Panics
-    /// 
-    /// Panics if the the event hasn't been insterted into the bevy App.
-    /// 
-    /// See [`App::add_event`]
-    pub fn send_event<E: Event>(&mut self, event: E) -> EventId<E> {
-        println!("Sending Event");
-        let mut events = self.world.get_resource_mut::<Events<E>>().unwrap();
-        events.send(event)
-    }
+    // /// Sends an [`Event`] to the game, that will be recieved on the next update cycle.
+    // /// 
+    // /// This is the same as calling [`EventWriter::send`] in a normal system
+    // /// 
+    // /// # Panics
+    // /// 
+    // /// Panics if the the event hasn't been insterted into the bevy App.
+    // /// 
+    // /// See [`App::add_event`]
+    // pub fn send_event<E: Event>(&mut self, event: E) -> EventId<E> {
+    //     println!("Sending Event");
+    //     let mut events = self.world.get_resource_mut::<Events<E>>().unwrap();
+    //     events.send(event)
+    // }
 
-    /// Get the current state
-    /// 
-    /// # Panics
-    /// 
-    /// Panics if the State is not present
-    /// 
-    /// See [`App::init_state`] or [`App::insert_state`]
-    pub fn get_state<S: States>(&self) -> S {
-        let next = self.world.get_resource::<State<S>>().unwrap();
-        next.get().clone()
-    }
+    // /// Get the current state
+    // /// 
+    // /// # Panics
+    // /// 
+    // /// Panics if the State is not present
+    // /// 
+    // /// See [`App::init_state`] or [`App::insert_state`]
+    // pub fn get_state<S: States>(&self) -> S {
+    //     let next = self.world.get_resource::<State<S>>().unwrap();
+    //     next.get().clone()
+    // }
 }
 
 

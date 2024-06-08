@@ -1,20 +1,27 @@
 use std::future::Future;
 
-use bevy::{ecs::system::{SystemParam, SystemState}, prelude::*};
+use bevy::{ecs::system::{SystemParam, SystemParamItem, SystemState}, prelude::*};
 
 use crate::{context::FlowContext, runner::FlowTaskRunner};
 
 
-/// Runs 
+/// The [`SystemSet`] for when [`FlowTasksPlugin`] executes the 
+/// next step in the **Flow** tasks.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, SystemSet)]
+pub struct FlowTaskSystemSet;
+
+/// Runs simple Flows asyncronously to the bevy Apps schedule.
+/// 
+/// **Flow**s are `async` functions which can request brief access to the
+/// bevy Apps [`World`] object. This allows for complicated data processing
+/// and action scheduling to be done without the complexities of multiple 
+/// systems coordinated by [`State`]s and [`Event`]s.
+/// 
+/// Execution always takes place in the [`Update`] Schedule.
+/// 
+/// For timing control, see [`FlowTaskSystemSet`].
 pub struct FlowTasksPlugin;
 
-// impl<S: ScheduleLabel + Clone> FlowTasksPlugin<S> {
-//     /// Create a [`FlowTasksPlugin`] where the flow task exclusive system
-//     /// runs on a schedule of your choosing.
-//     pub fn new(schedule: S) -> Self {
-//         Self { schedule }
-//     }
-// }
 
 impl Default for FlowTasksPlugin {
     fn default() -> Self {
@@ -28,7 +35,10 @@ impl Plugin for FlowTasksPlugin {
         app
             .init_state::<IsFlowing>()
             .init_resource::<FlowTaskList>()
-            .add_systems(Update, run_tasks)
+
+            .add_systems(Update, 
+                run_tasks.in_set(FlowTaskSystemSet)
+            )
         ;
     }
 }
@@ -42,6 +52,12 @@ enum IsFlowing {
 
 #[derive(Default, Resource, Deref, DerefMut)]
 pub struct FlowTaskList(Vec<FlowTaskRunner>);
+
+impl FlowTaskList {
+    fn clean(&mut self) {
+        self.0.retain(|flow| flow.is_in_progress())
+    }
+}
 
 
 /// Mannage running flow tasks. See crate docs for what those are
@@ -67,6 +83,36 @@ impl<'w, 's> FlowTaskManager<'w, 's> {
         self.next.set(IsFlowing::Yes);
     }
 
+    /// Returns the number of flows currently running. When a flow finishes
+    /// execution it is cleaned up, and will no longer be counted.
+    pub fn task_count(&self) -> usize {
+        self.list.len()
+    }
+
+    /// Schedules a task to execute one in the next [`FlowTaskSystemSet`] that 
+    /// will have mutable access to a single [`Resource`].
+    pub fn use_resource_soon<R: Resource, F>(&mut self, task_fn: F)
+    where
+        F: Fn(&mut R) -> () + Send + Sync + 'static
+    {
+        self.start(async |ctx: FlowContext| {
+            ctx.with_resource::<R, ()>(task_fn)
+        });
+    }
+
+    ///
+    pub fn use_system_param<P: SystemParam>(
+        &mut self,
+        task_fn: impl Fn(SystemParamItem<P>) -> () + Send + Sync + 'static
+    )
+    where
+        P: SystemParam + 'static,
+    {
+        self.start(async move |ctx: FlowContext| {
+            ctx.with::<P, _>(task_fn);
+        })
+    }
+
     /// Immediatly stop all running flow tasks. 
     /// 
     /// This won't cause memory safety problems
@@ -87,6 +133,9 @@ impl<'w, 's> FlowTaskManager<'w, 's> {
 
     /// pause all flow tasks the next time they need to access
     /// 
+    /// **Warning:** If a system is paused while a state change or event
+    /// it is waiting on occures, it will be missed. This could cause the
+    /// flow to wait forever, so use this feature cautiously.
     pub fn pause(&mut self) {
         self.next.set(IsFlowing::No);
     }
@@ -109,14 +158,11 @@ fn run_tasks(
     // so this should be safe
     let world_ref = unsafe { &mut *(world as *mut _) };
 
-    // if tasks_list.is_empty() { return }
-
-    for t in tasks.get_mut(world_ref).iter_mut() {
+    let mut tasks = tasks.get_mut(world_ref);
+    for t in tasks.iter_mut() {
         t.loan_world(world);
-        // if ! t.loan_world(world) {
-        //     done.push(index);
-        // }
     }
 
+    tasks.clean();
     // if ! done.is_empty() { println!("ALL TASK DONE!!!") }
 }
