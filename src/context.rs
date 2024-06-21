@@ -108,7 +108,9 @@ impl FlowContext {
         self.with_world(|world| {
             let mut state = SystemState::<Param>::new(world);
             let param = state.get_mut(world);
-            call(param)
+            let val = call(param);
+            state.apply(world);
+            val
         })        
     }
 
@@ -234,7 +236,6 @@ impl FlowContext {
     /// Panics if the the event hasn't been insterted into the bevy App.
     /// 
     /// See [`App::add_event`]
-    #[must_use]
     pub async fn await_event<E>(&self, filter: impl Fn(&E) -> bool) 
     where
         E: Event + Debug,
@@ -262,7 +263,6 @@ impl FlowContext {
     /// Panics if the the event hasn't been insterted into the bevy App.
     /// 
     /// See [`App::add_event`]
-    #[must_use]
     pub async fn await_event_return<E, F>(&self, filter: F) -> E
     where
         E: Event + Clone,
@@ -286,7 +286,6 @@ impl FlowContext {
     /// Panics if the the State hasn't been insterted into the bevy App.
     /// 
     /// See [`App::init_state`] or [`App::insert_state`]
-    #[must_use]
     pub async fn await_state<S: States>(&self, matches: S) {
         loop {
             let world = self.borrow().await;
@@ -300,7 +299,6 @@ impl FlowContext {
     /// Wait until a certain condition is met before continuing
     /// 
     /// **NOTE:** Be sure to use `await` on this function or it will be skipped
-    #[must_use]
     pub async fn await_cond<R>(&self, cond: impl Fn(&WorldRef) -> Option<R>) -> R {
         loop {
             let world = self.borrow().await;

@@ -14,3 +14,8 @@ mod runner;
 pub use plugin::{FlowTasksPlugin, FlowTaskManager};
 pub use context::{FlowContext, WorldRef};
 
+// impl<E> On<E>
+// pub fn run<Marker>(callback: impl IntoSystem<(), (), Marker>) -> Self
+// where
+//     // Bounds from impl:
+//     E: EntityEvent,
