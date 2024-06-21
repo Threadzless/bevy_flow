@@ -183,7 +183,7 @@ impl<'w, 's> FlowTaskManager<'w, 's> {
 
     fn next_flow_task_id(&mut self) -> FlowTaskId {
         let raw = self.list.next_id();
-        warn!("FlowTask id={raw}");
+        debug!("FlowTask id={raw}");
         FlowTaskId(raw)
     }
 
