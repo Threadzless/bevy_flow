@@ -1,10 +1,18 @@
+//! 
+
 use std::{future::Future, thread::{JoinHandle, spawn}};
 
 use bevy::{prelude::*, tasks::futures_lite::future::block_on};
 use async_channel::{bounded, Receiver, Sender};
 
-use crate::FlowContext;
+use crate::context::FlowContext;
 
+
+/// A unique id to track a 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct FlowTaskId(pub(crate) u64);
+
+/// Manages the execution of a flow task
 pub struct FlowTaskRunner {
     send: Sender<LTMsg>,
     recv: Receiver<LTResult>,
@@ -17,7 +25,7 @@ pub struct FlowTaskRunner {
 impl FlowTaskRunner {
 
     /// Start a new long running task. It will start immediatly
-    pub fn new<Func, Fut>(task_fn: Func, assets: AssetServer) -> Self 
+    pub fn new<Func, Fut>(task_fn: Func, assets: Option<AssetServer>) -> Self 
     where
         Func: FnOnce(FlowContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output=()> + Send + Sync,
@@ -42,21 +50,20 @@ impl FlowTaskRunner {
         }
     }
 
-    /// Let the 
+    /// Loan the [`World`] object to this task for a moment.
+    /// 
+    /// This is done automatically by 
     pub fn loan_world(&mut self, world: &mut World) -> bool {
         if self.recv.is_empty() { return false }
 
         block_on( self.load_world_call(world) )
     }
 
-    pub fn cancel(self) {
-        // let _ = self.task.cancel();
-        // self.task.
-        todo!()
-    }
-
-    pub fn is_in_progress(&self) -> bool {
-        ! self.task.is_finished()
+    /// Returns `true` if the task has completed.
+    /// 
+    /// [`FlowTasksPlugin`]
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 
     async fn load_world_call(&self, world: &mut World) -> bool {

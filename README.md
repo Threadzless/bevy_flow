@@ -40,33 +40,77 @@ This is achieved by periodically passing a pointer to bevy's `World` object to t
 ## Example
 
 ```rust
-use bevy::prelude::*;
+#![feature(async_closure)]
+use bevy::{prelude::*, app::AppExit};
 use bevy_flow::prelude::*;
 
 fn main() {
-    let mut app = App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(FlowingTaskPlugin);
+    let mut app = App::new();
+    app
+        .init_state::<TerrainState>()
+        .add_plugins(MinimalPlugins)
+        .add_plugins(FlowTasksPlugin)
+        .add_systems(OnEnter(TerrainState::Ready), exit_when_terrain_is_ready)
+        .add_systems(Startup, |mut flow: FlowTaskManager| {
+            flow.start(do_terrain_generation);
+        });
 
-        .add_systems(Startup, generate_world)
-
-    app.run()
+    app.run();
 }
 
-fn generate_world(mut flows: FlowingTaskManager) {
-    flows.start(async |mut access: FlowAccess|{
-        // ensure all of these assets are fully loaded before proceeding
-        let folder = access.load_folder("images/terrain").await;
+/// This is the FlowTask. It will run in parallel to the bevy app
+async fn do_terrain_generation(mut ctx: FlowContext) {
+    // actions which don't use `ctx` will run independent
+    // of the bevy app, so you don't have to worry about blocking
+    let mut terrain = MyTerrainResource::new();
+    terrain.generate();
 
-        // combine those images into a Texture2dArray
-        let mut texture_atlas = TextureAtlasBuilder::default();
-        access.for_each_image(|image: &Image, id: AssetId<Image>, path: Option<PathBuf>| {
-            texture_atlas.add_texture(Some(id), image);
-        }).await;
+    // this will wait until the right time in the update cycle, and
+    // borrow access to `World` to accomplish the task.
+    ctx.insert_resource(terrain);
 
-        let (_layout, mut tile_sheet) = self.builder.finish().unwrap();
-        access.
-    });
+    // this won't happen until the update after the previous line
+    ctx.set_state(TerrainState::Ready);
+
+    // borrow the [`World`] from the bevy app at the next opportunity, 
+    // through a reference
+    let world_ref = ctx.borrow();
+
+    // ... do stuff ... //
+
+    // when the reference is dropped, the [`World`] is returned to
+    // the bevy app for at least one [`Update`] cycle
+    drop(world_ref);
+}
+
+
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, States)]
+enum TerrainState {
+    #[default]
+    Generating,
+    Ready,
+}
+
+#[derive(Resource)]
+struct MyTerrainResource;
+
+impl MyTerrainResource {
+    fn new() -> Self {
+        Self { }
+    }
+
+    // This will take a while
+    fn generate(&mut self) {
+        let mut count = 0;
+        for i in 0..10_000_000 {
+            count += (i % 4);
+        }
+        println!("Total: {count}");
+    }
+}
+
+fn exit_when_terrain_is_ready(mut exits: EventWriter<AppExit>) {
+    exits.send(AppExit);
 }
 ```
 

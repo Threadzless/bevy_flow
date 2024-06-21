@@ -3,7 +3,7 @@
 use std::ops::Add;
 
 use bevy::{app::AppExit, prelude::*};
-use bevy_flow::{FlowContext, FlowTaskManager, FlowTasksPlugin};
+use bevy_flow::prelude::*;
 
 
 #[derive(Resource, Default)]

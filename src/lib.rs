@@ -5,17 +5,15 @@
 #![warn(clippy::absolute_paths)]
 
 #![feature(async_closure)]
+#![feature(unboxed_closures)]
 #![feature(exact_size_is_empty)]
 
-mod context;
-mod plugin;
-mod runner;
+pub mod context;
+pub mod plugin;
+pub mod runner;
 
-pub use plugin::{FlowTasksPlugin, FlowTaskManager};
-pub use context::{FlowContext, WorldRef};
-
-// impl<E> On<E>
-// pub fn run<Marker>(callback: impl IntoSystem<(), (), Marker>) -> Self
-// where
-//     // Bounds from impl:
-//     E: EntityEvent,
+/// The stuff you will likely need, all in one place
+pub mod prelude {
+    pub use crate::context::{FlowContext, WorldRef};
+    pub use crate::plugin::{FlowTasksPlugin, FlowTaskSystemSet, FlowTaskManager};
+}

@@ -1,6 +1,13 @@
-use std::{any::type_name, fmt::Debug, ops::{Deref, DerefMut}};
+//!
 
-use bevy::{asset::{AssetPath, LoadedFolder}, ecs::{event::EventId, system::{SystemParam, SystemParamItem, SystemState}}, prelude::*, tasks::block_on};
+use std::{any::type_name, ops::{Deref, DerefMut}};
+
+use bevy::{
+    asset::{AssetPath, LoadedFolder},
+    ecs::{event::EventId, system::{SystemParam, SystemState}},
+    prelude::*,
+    tasks::block_on
+};
 use async_channel::{Receiver, Sender};
 
 use crate::runner::{LTMsg, LTResult};
@@ -16,14 +23,14 @@ use crate::runner::{LTMsg, LTResult};
 pub struct FlowContext {
     send: Sender<LTResult>,
     recv: Receiver<LTMsg>,
-    assets: AssetServer,
+    assets: Option<AssetServer>,
 }
 
 impl FlowContext {
     pub(crate) fn new(
         send: Sender<LTResult>,
         recv: Receiver<LTMsg>,
-        assets: AssetServer
+        assets: Option<AssetServer>
     ) -> Self {
         Self {
             send,
@@ -86,40 +93,80 @@ impl FlowContext {
         })
     }
 
-    /// Get a single Resource for a moment
+    /// Run a system once. This works similar to bevy's [`App::add_systems`].
+    /// The main difference is the provided callback is only runs once, at this point
+    /// in the flow. 
+    /// 
+    /// also the passed system can return a value to the earlier context
+    /// 
+    /// ### Example
+    /// ```ignore
+    /// # #![feature(async_closure)]
+    /// # use bevy::prelude::*;
+    /// # use bevy_flow::prelude::*;
+    /// 
+    /// flow.start(async |mut ctx: FlowContext| {
+    ///     // Use bevy resources, just like a system
+    ///     let ret = ctx.once(|mut events: EventReader<CursorMoved>, mut cmds: Commands| {
+    ///         // do stuff with resources
+    ///         32 // return value to pass to parent flow scope
+    ///     });
+    ///     assert_eq!(ret, 32);
+    /// })
+    /// ```
+    /// # 
+    /// The callback can contain 0-16 arguemnts, which must implement [`SystemParam`]. 
+    /// This includes:
+    /// - [`Commands`]
+    /// - [`Query`]s
+    /// - Any [`Resource`], using [`Res`] or [`ResMut`].
+    /// - [`EventReader`]s and [`EventWriter`]s.
+    /// - Optional `Resources` (`Option<Res<...>>` or `Option<ResMut<...>>`)
+    /// - Tuples with upto 16 elements where all the elements implement [`SystemParam`]. This
+    ///   works recursively, so there is no hard limit on how many parameters you can bring
+    ///   into scope at once.
+    /// 
+    /// **Note**: [`Local`]s will work, but as thsi system runs exactly once, using them 
+    /// is pointless
+    /// 
+    /// This doesn't support exclusive systems, so if you need to access 
+    /// [`World`], use [`with_world`](Self::with_world). 
     /// 
     /// # Panics
     /// 
-    /// Panics if the Resource doesn't exist
-    pub fn with_resource<Res, Ret>(&self, call: impl FnOnce(&mut Res) -> Ret) -> Ret 
-    where Res: Resource
+    /// This for the same reasons a normal bevy system would panic:
+    /// - Two or more `Query`s request access to the same [`Component`], and at least one 
+    ///   of them are mutable.
+    /// - A `Resource`, [`Event`], or [`State`] is requested that isn't present.
+    pub fn with<'a, Sys, Out, Params>(&self, _system: Sys) -> Out
+    where
+        Params: SystemParam + 'static,
+        Sys: FnOnce(Params::Item<'a, 'a>) -> Out + 'a,
+        // Sys: SystemParamFunction<()> + FnOnce(Params) -> Out + 'a,
+        Out: Send + Sync + 'a
     {
+        // Sys::Param::
         self.with_world(|world| {
-            let mut res = world.get_resource_mut::<Res>().unwrap();
-            call(&mut res)
+            let mut state = SystemState::<Params>::new(world);
+            let state_ref = unsafe {
+                &mut *(&mut state as *mut SystemState::<Params>)
+            };
+            let params = state_ref.get_mut(unsafe { &mut *(world as *mut _)});
+            let out = _system(params);
+            let state_ref = unsafe {
+                &mut *(&mut state as *mut SystemState::<Params>)
+            };
+            state_ref.apply(world);
+            out
         })
     }
 
-    /// Get access to multiple resources and/or queries
-    pub fn with<Param, Ret>(&self, call: impl FnOnce(SystemParamItem<Param>) -> Ret) -> Ret 
-    where
-        Param: SystemParam + 'static,
-    {
-        self.with_world(|world| {
-            let mut state = SystemState::<Param>::new(world);
-            let param = state.get_mut(world);
-            let val = call(param);
-            state.apply(world);
-            val
-        })        
-    }
-
-    /// Gets a copy of a Resource
+    /// Gets a copy of a [`Resource`]
     /// 
     /// # Panics
     /// 
     /// Panics if the Resource doesn't exist
-    pub fn copy_res<R>(&self) -> R
+    pub fn copy_resource<R>(&self) -> R
     where
         R: Resource + Clone 
     {
@@ -128,26 +175,48 @@ impl FlowContext {
         })
     }
 
-    // pub fn with_system<Sys>
-    // TODO: system params
+    /// Inserts a new resource with the given value.
+    /// 
+    /// Resources are "unique" data of a given type. If you insert a 
+    /// resource of a type that already exists, you will overwrite any existing data.
+    pub fn insert_resource<R>(&self, resource: R) 
+    where 
+        R: Resource 
+    {
+        self.with_world(|world| {
+            world.insert_resource(resource)
+        })
+    }
 
     /// Directly access the [`AssetServer`]. Using this doesn't effect the main apps 
-    /// scheduling, and works as normal
+    /// scheduling, and will work as normal
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the [`AssetPlugin`] is not available
     pub fn asset_server(&self) -> &AssetServer {
-        &self.assets
+        self.assets.as_ref().unwrap()
     }
 
     /// Same as [`AssetServer::load`]
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the [`AssetPlugin`] is not available
     pub fn load_asset<'a, A: Asset>(&self, path: impl Into<AssetPath<'a>>) -> Handle<A> {
-        self.assets.load(path)
+        let assets = self.assets.as_ref().unwrap();
+        assets.load(path)
     }
 
     /// Same as [`AssetServer::load_folder`]
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the [`AssetPlugin`] is not available
     pub fn load_folder<'a>(&self, path: impl Into<AssetPath<'a>>) -> Handle<LoadedFolder> {
-        self.assets.load_folder(path)
+        let assets = self.assets.as_ref().unwrap();
+        assets.load_folder(path)
     }
-
-
 
     /// Schedules changing a [`State`] resource at the end of the next update cycle.
     /// 
@@ -164,7 +233,6 @@ impl FlowContext {
             world.insert_resource(NextState::<S>::default())
         }
     }
-
 
     /// Sends an [`Event`] to the game, that will be recieved on the next update cycle.
     /// 
@@ -201,13 +269,18 @@ impl FlowContext {
     /// the assets loaded loaded
     /// 
     /// **NOTE:** Be sure to use `await` on this function or it will be skipped
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the [`AssetPlugin`] is not available
     #[allow(clippy::missing_panics_doc)] // shouldn't be able to panic
     pub async fn await_folder(
         &self, 
         path: impl Into<AssetPath<'_>>
     ) -> (Handle<LoadedFolder>, LoadedFolder) 
     {
-        let folder_handle = self.assets.load_folder(path);
+        let assets = self.asset_server();
+        let folder_handle = assets.load_folder(path);
         let folder_id = Into::<AssetId<LoadedFolder>>::into(folder_handle.clone());
         
         let _ = self.await_event::<AssetEvent<LoadedFolder>>(|evt| {
@@ -238,12 +311,12 @@ impl FlowContext {
     /// See [`App::add_event`]
     pub async fn await_event<E>(&self, filter: impl Fn(&E) -> bool) 
     where
-        E: Event + Debug,
+        E: Event
     {
         loop {
             let world = self.borrow().await;
             let Some(events) = world.get_resource::<Events<E>>() else {
-                panic!("Resource {} is not present", type_name::<Events<E>>())
+                panic!("Resource {} is not present", type_name::<E>())
             };
             let mut reader = events.get_reader();
 
@@ -263,16 +336,19 @@ impl FlowContext {
     /// Panics if the the event hasn't been insterted into the bevy App.
     /// 
     /// See [`App::add_event`]
-    pub async fn await_event_return<E, F>(&self, filter: F) -> E
+    pub async fn await_event_return<E, Ret>(&self, filter: impl Fn(&E) -> Option<Ret>) -> Ret
     where
-        E: Event + Clone,
-        F: Fn(&E) -> bool,
+        E: Event
     {
         loop {
             let world = self.borrow().await;
-            let events = world.get_resource::<Events<E>>().unwrap();
+            let Some(events) = world.get_resource::<Events<E>>() else {
+                panic!("Flow Context unable to locate event: {}", type_name::<E>());
+            };
             for evt in events.get_reader().read(events) {
-                if filter(evt) { return evt.clone() }
+                if let Some(ret) = filter(evt) {
+                    return ret
+                }
             }
         }
     }
