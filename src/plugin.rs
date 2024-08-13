@@ -170,15 +170,15 @@ impl<'w, 's> FlowTaskManager<'w, 's> {
     /// - A [`Component`] is requested by two or more [`Query`]s and at least one
     ///   of the requests is mutable without ensuring exclusivity
     /// - Any other reason a normal bevy system will panic
-    pub fn soon<'a, Sys, M>(&mut self, _system: Sys) -> FlowTaskId
+    pub fn soon<'a, Sys, Out, Params>(&mut self, system: Sys) -> FlowTaskId
     where
-        Sys: IntoSystem<(), (), M> + Send + Sync + 'static,
-        // In: for<'w2, 's2> SystemParam::<State = (), Item<'w2, 's2>=In> + 'static
+        Params: SystemParam + 'static,
+        Sys: FnOnce(Params::Item<'a, 'a>) -> Out + Send + Sync + 'static,
+        Out: Send + Sync + 'a
     {
-        // self.start(async |ctx: FlowContext| {
-        //     ctx.with(system);
-        // })
-        todo!()
+        self.start(async |ctx: FlowContext| {
+            ctx.with::<_, _, Params>(system);
+        })
     }
 
     fn next_flow_task_id(&mut self) -> FlowTaskId {

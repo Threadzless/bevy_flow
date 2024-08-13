@@ -92,6 +92,6 @@ fn complete(
         }
         print!("\n");
 
-        exit.send(AppExit);
+        exit.send(AppExit::Success);
     }
 }

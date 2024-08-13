@@ -1,6 +1,6 @@
 [package]
 name = "bevy_flow"
-version = "1.0.0"
+version = "1.14.0"
 edition = "2021"
 
 
@@ -9,6 +9,9 @@ async-channel = "2.3"
 
 
 [dependencies.bevy]
-version = "0.13.2"
-# default-features = false
-# features = [ "bevy_asset" ]
+version = "0.14"
+default-features = false
+features = [
+    "bevy_asset",
+    "bevy_state"
+]

@@ -3,10 +3,7 @@
 use std::{any::type_name, ops::{Deref, DerefMut}};
 
 use bevy::{
-    asset::{AssetPath, LoadedFolder},
-    ecs::{event::EventId, system::{SystemParam, SystemState}},
-    prelude::*,
-    tasks::block_on
+    asset::{AssetPath, LoadedFolder}, ecs::{event::EventId, system::{SystemParam, SystemState}}, prelude::*, state::state::FreelyMutableState, tasks::block_on
 };
 use async_channel::{Receiver, Sender};
 
@@ -223,7 +220,7 @@ impl FlowContext {
     /// This is equivalent to calling [`NextState::set`] in a normal system
     /// 
     /// If the state is not present in the app it is added.
-    pub fn set_state<S: States>(&self, new: S) {
+    pub fn set_state<S: States + FreelyMutableState>(&self, new: S) {
         let mut world = self.world_sync();
         if let Some(mut next) = world.get_resource_mut::<NextState<S>>() {
             next.set(new);
@@ -281,11 +278,11 @@ impl FlowContext {
     {
         let assets = self.asset_server();
         let folder_handle = assets.load_folder(path);
-        let folder_id = Into::<AssetId<LoadedFolder>>::into(folder_handle.clone());
+        let folder_id = folder_handle.clone().id();
         
         let _ = self.await_event::<AssetEvent<LoadedFolder>>(|evt| {
             match evt {
-                AssetEvent::LoadedWithDependencies { id } => &folder_id == id,
+                AssetEvent::LoadedWithDependencies { id } => { folder_id == *id },
                 _ => false
             }
         }).await;
@@ -293,7 +290,7 @@ impl FlowContext {
         let world = self.borrow().await;
         let folders = world.get_resource::<Assets<LoadedFolder>>().unwrap();
 
-        let folder = folders.get(folder_handle.clone()).unwrap();
+        let folder = (*folders).get(&folder_handle.clone()).unwrap();
         let folder = LoadedFolder {
             handles: folder.handles.clone(),
         };
