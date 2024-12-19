@@ -315,9 +315,9 @@ impl FlowContext {
             let Some(events) = world.get_resource::<Events<E>>() else {
                 panic!("Resource {} is not present", type_name::<E>())
             };
-            let mut reader = events.get_reader();
+            let mut cursor = events.get_cursor();
 
-            for evt in reader.read(events) {
+            for evt in cursor.read(events) {
                 if filter(evt) { return }
             }
         }
@@ -342,7 +342,7 @@ impl FlowContext {
             let Some(events) = world.get_resource::<Events<E>>() else {
                 panic!("Flow Context unable to locate event: {}", type_name::<E>());
             };
-            for evt in events.get_reader().read(events) {
+            for evt in events.get_cursor().read(events) {
                 if let Some(ret) = filter(evt) {
                     return ret
                 }

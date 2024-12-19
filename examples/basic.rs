@@ -63,7 +63,7 @@ fn start_task(mut tasks: FlowTaskManager) {
 
 
 fn track_cycles(time: Res<Time>, mut utl: ResMut<UpdateTimesList>) {
-    utl.times.push(time.elapsed_seconds())
+    utl.times.push(time.elapsed_secs())
 }
 
 
